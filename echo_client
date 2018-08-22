@@ -52,6 +52,7 @@ if __name__ == '__main__':
                         help='server address')
     parser.add_argument('--output-format', default='text', type=str,
                         help='output format', choices=['text', 'json'])
+    parser.add_argument('--ssl', action='store_true', help='enable SSL')
     args = parser.parse_args()
 
     unix = False
@@ -78,6 +79,16 @@ if __name__ == '__main__':
 
         sock.settimeout(timeout / 1000)
         sock.connect(addr)
+        cipher = None
+        if args.ssl:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            ssl_context.set_ciphers('ECDHE-RSA-AES128-GCM-SHA256')
+            sock = ssl_context.wrap_socket(sock)
+            sock.do_handshake()
+            cipher = '%s %s %dbits' % sock.cipher()
 
         n = 0
         latency_stats = np.zeros((timeout * 100,))
@@ -106,7 +117,7 @@ if __name__ == '__main__':
         except OSError:
             pass
 
-        return n, latency_stats, min_latency, max_latency
+        return n, latency_stats, min_latency, max_latency, cipher
 
     N = args.concurrency
     DURATION = args.duration
@@ -116,6 +127,7 @@ if __name__ == '__main__':
     messages = 0
     latency_stats = None
     start = time.monotonic()
+    ciphers = set()
 
     with futures.ProcessPoolExecutor(max_workers=N) as e:
         fs = []
@@ -124,8 +136,9 @@ if __name__ == '__main__':
 
         res = futures.wait(fs)
         for fut in res.done:
-            t_messages, t_latency_stats, t_min_latency, t_max_latency = \
+            t_messages, t_latency_stats, t_min_latency, t_max_latency, cip = \
                 fut.result()
+            ciphers.add(cip)
             messages += t_messages
             if latency_stats is None:
                 latency_stats = t_latency_stats
@@ -167,7 +180,8 @@ if __name__ == '__main__':
         latency_max=round(max_latency / 100, 3),
         latency_std=round(latency_std / 100, 3),
         latency_cv=round(latency_cv * 100, 2),
-        latency_percentiles=percentile_data
+        latency_percentiles=percentile_data,
+        ciphers=', '.join(ciphers),
     )
 
     if args.output_format == 'json':
@@ -183,7 +197,8 @@ if __name__ == '__main__':
     "latency_max": {latency_max},
     "latency_std": {latency_std},
     "latency_cv": {latency_cv},
-    "latency_percentiles": {latency_percentiles}
+    "latency_percentiles": {latency_percentiles},
+    "ciphers": "{ciphers}"
 }}'''.format(**data)
     else:
         data['latency_percentiles'] = '; '.join(
@@ -196,6 +211,7 @@ std: {latency_std}ms ({latency_cv}%)
 Latency distribution: {latency_percentiles}
 Requests/sec: {rps}
 Transfer/sec: {transfer}MiB
+Ciphers: {ciphers}
 '''.format(duration=DURATION, size=round(MSGSIZE / 1024, 2), **data)
 
     print(output)

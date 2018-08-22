@@ -1,5 +1,7 @@
 # Taken from curio: https://github.com/dabeaz/curio
 
+import os
+import sys
 from gevent.server import StreamServer
 from socket import *
 
@@ -18,5 +20,10 @@ def echo(socket, address):
     socket.close()
 
 if __name__ == '__main__':
-    server = StreamServer(('0.0.0.0', 25000), echo)
+    kwargs = {}
+    if len(sys.argv) > 1 and sys.argv[1] == '--ssl':
+        path = os.path.dirname(os.path.abspath(__file__))
+        kwargs['keyfile'] = os.path.join(path, "ssl_test_rsa")
+        kwargs['certfile'] = os.path.join(path, "ssl_test.crt")
+    server = StreamServer(('0.0.0.0', 25000), echo, **kwargs)
     server.serve_forever()

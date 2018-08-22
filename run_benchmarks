@@ -26,6 +26,7 @@ server_base = ['docker', 'run', '--rm', '-t', '-p', '25000:25000',
                '-e', 'GID={}'.format(os.getegid()),
                '-v', '{_cache}:/var/lib/cache'.format(_cache=_cache),
                '-v', '{_socket}:/tmp/sockets'.format(_socket=_socket),
+               '-w', '/usr/src/servers',
                '--name', 'magicbench', 'magic/benchmark']
 
 python = ['vex', 'bench', 'python']
@@ -41,6 +42,7 @@ unix_client = echo_client + ['--addr={}'.format(unix_address)]
 http_client = ['./http_client', '--output-format=json',
                '--addr={}'.format(tcp_address)]
 readline_client = tcp_client + ['--mpr=5']
+ssl_client = tcp_client + ['--ssl']
 
 benchmarks = [{
     'name': 'tcpecho-gevent-sockets',
@@ -213,6 +215,60 @@ benchmarks = [{
     'server': ['/usr/src/servers/gohttp'],
     'server_address': tcp_address,
     'client': http_client,
+}, {
+    'name': 'ssl-threaded',
+    'title': 'SSL echo server (threaded)',
+    'server': python + ['/usr/src/servers/threadsslecho.py'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-twisted',
+    'title': 'SSL echo server (twisted)',
+    'server': python + ['/usr/src/servers/twistedecho.py', '--ssl'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-gevent',
+    'title': 'SSL echo server (gevent)',
+    'server': python + ['/usr/src/servers/gevecho.py', '--ssl'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-golang-sockets',
+    'title': 'SSL echo server (golang)',
+    'server': ['/usr/src/servers/goecho', '--ssl'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-nodejs-streams',
+    'title': 'SSL echo server (nodejs)',
+    'server': nodejs + ['/usr/src/servers/nodeecho.js', '--ssl'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-asyncio-protocol',
+    'title': 'SSL echo server (asyncio)',
+    'server': python + ['/usr/src/servers/asyncioecho.py',
+                        '--addr=0.0.0.0:25000', '--ssl',
+                        '--proto'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-uvloop-protocol',
+    'title': 'SSL echo server (uvloop)',
+    'server': python + ['/usr/src/servers/asyncioecho.py',
+                        '--addr=0.0.0.0:25000', '--ssl',
+                        '--proto', '--uvloop'],
+    'server_address': tcp_address,
+    'client': ssl_client,
+}, {
+    'name': 'ssl-uvloop-buffered-protocol',
+    'title': 'SSL echo server (uvloop buffered)',
+    'server': python + ['/usr/src/servers/asyncioecho.py',
+                        '--addr=0.0.0.0:25000', '--ssl',
+                        '--proto', '--uvloop', '--buffered'],
+    'server_address': tcp_address,
+    'client': ssl_client,
 }]
 
 
@@ -245,6 +301,13 @@ def start_and_wait_for_server(server_cmd, address, timeout=60):
         sock.settimeout(time.monotonic() - start)
         try:
             sock.connect(addr)
+            if 'ssl' in (' '.join(server_cmd)).lower():
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                sock = ssl_context.wrap_socket(sock)
+                sock.do_handshake()
             sock.sendall(b'GET / HTTP/1.0\r\n\r\n')
             if sock.recv(4):
                 print('Server is up and running.')
@@ -297,7 +360,7 @@ def kill_server():
 
     if server_container_exists():
         print('Removing server container...')
-        subprocess.check_output(['docker', 'rm', 'magicbench'])
+        subprocess.check_output(['docker', 'rm', '-f', 'magicbench'])
 
 
 def format_report(data, target_file):
@@ -348,6 +411,7 @@ def format_report(data, target_file):
                 ('Mean latency', []),
                 ('Max latency', []),
                 ('Latency variation', []),
+                ('Ciphers', [])
             ))
 
         variations = benchmark['variations']
@@ -370,6 +434,7 @@ def format_report(data, target_file):
                     '{}ms'.format(variation['latency_max']))
                 brecords['Latency variation'].append('{}ms ({}%)'.format(
                     variation['latency_std'], variation['latency_cv']))
+                brecords['Ciphers'].append(variation['ciphers'])
 
     vc = len(data['concurrency_levels']) * len(data['payload_size_levels'])
 
@@ -538,6 +603,7 @@ def main():
                 Latency distribution: {latency_percentiles}
                 Requests/sec: {rps}
                 Transfer/sec: {transfer}MiB
+                Ciphers: {ciphers}
                 ''').format(duration=duration, **format_data)
 
                 print(output)
@@ -545,6 +611,59 @@ def main():
                 benchmark_data['variations'].append(data)
         finally:
             kill_server()
+
+        print()
+
+    if 'ssl' in args.benchmarks:
+        title = 'ssl-raw'
+        print(title)
+        print('=' * len(title))
+        print()
+
+        benchmark_data = {
+            'name': title,
+            'variations': []
+        }
+
+        benchmarks_data.append(benchmark_data)
+        ssl_cmd = server_base + ['/usr/src/servers/sslbench', 'bulk',
+                                 'ECDHE-RSA-AES128-GCM-SHA256']
+        for variation in variations:
+            title = 'BENCHMARK: {}'.format(variation['title'])
+            print(title)
+            print('-' * len(title))
+            msgsize = variation['payload_size']
+
+            cmd = ssl_cmd + [str(msgsize)]
+            print('  ' + ' '.join(cmd))
+            output = subprocess.check_output(cmd, universal_newlines=True)
+            data = json.loads(output)
+            data['transfer'] = round(msgsize * data['messages'] /
+                                     data['duration'] / 1024 / 1024, 2)
+            data['rps'] = round(data['messages'] / data['duration'], 2)
+            avg = round(data['duration'] / data['messages'], 3)
+            data['latency_mean'] = data['latency_std'] = data['latency_cv'] = avg
+            data['latency_min'] = round(data['latency_min'], 3)
+            data['latency_max'] = round(data['latency_max'], 3)
+            data['latency_percentiles'] = [(p, avg) for p in [25, 50, 75, 90, 99, 99.99]]
+
+            format_data = data.copy()
+
+            format_data['latency_percentiles'] = '; '.join(
+                '{}% under {}ms'.format(*v)
+                for v in data['latency_percentiles'])
+
+            output = textwrap.dedent('''\
+                {messages} messages in {duration} seconds
+                Latency: min {latency_min}ms; max {latency_max}ms; mean {latency_mean}ms; std {latency_std}ms ({latency_cv}%);
+                Latency distribution: {latency_percentiles}
+                Requests/sec: {rps}
+                Transfer/sec: {transfer}MiB
+                Ciphers: {ciphers}
+                ''').format(**format_data)
+
+            print(output)
+            benchmark_data['variations'].append(data)
 
         print()
 

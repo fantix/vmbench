@@ -1,7 +1,6 @@
 import json
 import os.path
 import platform
-import warnings
 
 
 if __name__ == '__main__':
@@ -11,7 +10,7 @@ if __name__ == '__main__':
 
     cpuinfo_f = '/proc/cpuinfo'
 
-    if (processor in {machine, 'unknown'} and os.path.exists(cpuinfo_f)):
+    if (processor in {machine, 'unknown', ''} and os.path.exists(cpuinfo_f)):
         with open(cpuinfo_f, 'rt') as f:
             for line in f:
                 if line.startswith('model name'):
@@ -19,22 +18,13 @@ if __name__ == '__main__':
                     processor = p.strip()
                     break
 
+    distribution = None
     if 'Linux' in system:
 
-        with warnings.catch_warnings():
-            # see issue #1322 for more information
-            warnings.filterwarnings(
-                'ignore',
-                'dist\(\) and linux_distribution\(\) '
-                'functions are deprecated .*',
-                PendingDeprecationWarning,
-            )
-            distname, distversion, distid = platform.dist('')
-
-        distribution = '{} {}'.format(distname, distversion).strip()
-
-    else:
-        distribution = None
+        dist_f = '/etc/issue'
+        if os.path.exists(dist_f):
+            with open(dist_f, 'rt') as f:
+                distribution = f.read().strip()
 
     data = {
         'cpu': processor,

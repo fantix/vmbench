@@ -10,7 +10,7 @@ from socket import *
 PRINT = 0
 
 
-async def echo_server(loop, address, unix):
+async def echo_server(loop, address, unix, ssl=None):
     if unix:
         sock = socket(AF_UNIX, SOCK_STREAM)
     else:
@@ -23,10 +23,12 @@ async def echo_server(loop, address, unix):
         print('Server listening at', address)
     with sock:
         while True:
-             client, addr = await loop.sock_accept(sock)
-             if PRINT:
-                print('Connection from', addr)
-             loop.create_task(echo_client(loop, client))
+            client, addr = await loop.sock_accept(sock)
+            if PRINT:
+               print('Connection from', addr)
+            if ssl:
+                client = ssl.wrap_socket(client, server_side=True)
+            loop.create_task(echo_client(loop, client))
 
 
 async def echo_client(loop, client):
@@ -79,6 +81,27 @@ class EchoProtocol(asyncio.Protocol):
         self.transport.write(data)
 
 
+class EchoBufferedProtocol(asyncio.BufferedProtocol):
+    def connection_made(self, transport):
+        self.transport = transport
+        self.buffer = bytearray(256 * 1024)
+        self.view = memoryview(self.buffer)
+        sock = transport.get_extra_info('socket')
+        try:
+            sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+        except (OSError, NameError):
+            pass
+
+    def connection_lost(self, exc):
+        self.transport = None
+
+    def get_buffer(self, sizehint):
+        return self.buffer
+
+    def buffer_updated(self, nbytes):
+        self.transport.write(self.view[:nbytes].tobytes())
+
+
 async def print_debug(loop):
     while True:
         print(chr(27) + "[2J")  # clear screen
@@ -91,8 +114,10 @@ if __name__ == '__main__':
     parser.add_argument('--uvloop', default=False, action='store_true')
     parser.add_argument('--streams', default=False, action='store_true')
     parser.add_argument('--proto', default=False, action='store_true')
+    parser.add_argument('--buffered', default=False, action='store_true')
     parser.add_argument('--addr', default='127.0.0.1:25000', type=str)
     parser.add_argument('--print', default=False, action='store_true')
+    parser.add_argument('--ssl', action='store_true', help='enable SSL')
     args = parser.parse_args()
 
     if args.uvloop:
@@ -101,6 +126,17 @@ if __name__ == '__main__':
     else:
         loop = asyncio.new_event_loop()
         print('using asyncio loop')
+
+    if args.ssl:
+        import ssl
+        path = os.path.dirname(os.path.abspath(__file__))
+        KEYFILE = os.path.join(path, "ssl_test_rsa")
+        CERTFILE = os.path.join(path, "ssl_test.crt")
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(certfile=CERTFILE, keyfile=KEYFILE)
+        ssl = context
+    else:
+        ssl = None
 
     asyncio.set_event_loop(loop)
     loop.set_debug(False)
@@ -130,14 +166,18 @@ if __name__ == '__main__':
             print('cannot use --stream and --proto simultaneously')
             exit(1)
 
+        if args.proto:
+            print('cannot use --stream and --buffered simultaneously')
+            exit(1)
+
         print('using asyncio/streams')
         if unix:
             coro = asyncio.start_unix_server(echo_client_streams,
-                                             addr, loop=loop,
+                                             addr, loop=loop, ssl=ssl,
                                              limit=1024 * 1024)
         else:
             coro = asyncio.start_server(echo_client_streams,
-                                        *addr, loop=loop,
+                                        *addr, loop=loop, ssl=ssl,
                                         limit=1024 * 1024)
         srv = loop.run_until_complete(coro)
     elif args.proto:
@@ -145,15 +185,21 @@ if __name__ == '__main__':
             print('cannot use --stream and --proto simultaneously')
             exit(1)
 
-        print('using simple protocol')
-        if unix:
-            coro = loop.create_unix_server(EchoProtocol, addr)
+        if args.buffered:
+            print('using buffered protocol')
+            protocol = EchoBufferedProtocol
         else:
-            coro = loop.create_server(EchoProtocol, *addr)
+            print('using simple protocol')
+            protocol = EchoProtocol
+
+        if unix:
+            coro = loop.create_unix_server(protocol, addr, ssl=ssl)
+        else:
+            coro = loop.create_server(protocol, *addr, ssl=ssl)
         srv = loop.run_until_complete(coro)
     else:
         print('using sock_recv/sock_sendall')
-        loop.create_task(echo_server(loop, addr, unix))
+        loop.create_task(echo_server(loop, addr, unix, ssl=ssl))
     try:
         loop.run_forever()
     finally:

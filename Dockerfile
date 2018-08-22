@@ -1,9 +1,9 @@
-FROM ubuntu:16.04
+FROM python:3.7
 MAINTAINER elvis@magic.io
 
 RUN DEBIAN_FRONTEND=noninteractive \
         apt-get update && apt-get install -y \
-            language-pack-en
+            locales locales-all
 
 ENV LANG en_US.UTF-8
 ENV WORKON_HOME /usr/local/python-venvs
@@ -16,15 +16,16 @@ ENV GOPATH /usr/go/
 RUN DEBIAN_FRONTEND=noninteractive \
         apt-get update && apt-get install -y \
             autoconf automake libtool build-essential \
-            python3 python3-pip git nodejs golang gosu
+            python3 python3-pip git nodejs golang gosu libssl-dev
 
 RUN pip3 install vex
-RUN vex --python=python3.5 -m bench pip install -U pip
+RUN vex --python=python3 -m bench pip install -U pip
 RUN mkdir -p /var/lib/cache/pip
 
 ADD servers /usr/src/servers
 RUN cd /usr/src/servers && go build goecho.go && \
-        go get github.com/golang/groupcache/lru && go build gohttp.go
+        go get github.com/golang/groupcache/lru && go build gohttp.go && \
+        g++ -g -Wall -Werror -O2 sslbench.cc  -lssl -lcrypto -ldl -lpthread -o sslbench
 RUN vex bench pip --cache-dir=/var/lib/cache/pip \
         install -r /usr/src/servers/requirements.txt
 
